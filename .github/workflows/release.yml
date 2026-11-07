@@ -1,0 +1,130 @@
+# Releases the action when a version tag such as v1.0.0 is pushed. Only
+# administrators can create those tags, and no one can move or delete them.
+#
+# build tests the tagged commit with a read-only token and no secret, and
+# hands over the files the action runs. release runs in the `release`
+# environment, which needs an owner's approval: it records a build provenance
+# attestation for those files and creates a draft release from the changelog.
+# An organization owner then opens the draft, ticks "Publish this Action to the
+# GitHub Marketplace", and publishes it. Releases are immutable, so from then
+# on neither the tag nor the release can change.
+#
+# The tag must equal "v" and VERSION in src/action.mjs, and CHANGELOG.md must
+# have a section for that version.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test the tagged commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Check the tag against VERSION and the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(node --input-type=module -e 'import { VERSION } from "./src/action.mjs"; console.log(VERSION);')"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match VERSION $version in src/action.mjs"
+            exit 1
+          fi
+          if ! grep -qx "## $version" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+
+      - name: Run the unit tests
+        run: node --test "test/*.test.mjs"
+
+      - name: Collect the release files
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release"
+          mkdir -p "$out/src"
+          cp action.yml "$out/"
+          cp src/*.mjs "$out/src/"
+          # This version's changelog section, without blank lines around it, becomes the release notes.
+          awk -v heading="## ${TAG#v}" '
+            $0 == heading { keep = 1; next }
+            /^## / { keep = 0 }
+            keep && NF { printf "%s%s\n", pending, $0; pending = ""; started = 1; next }
+            keep && started { pending = pending "\n" }
+          ' CHANGELOG.md > "$out/notes.md"
+          if [ ! -s "$out/notes.md" ]; then
+            echo "::error::The CHANGELOG.md section for ${TAG#v} is empty"
+            exit 1
+          fi
+          cd "$out"
+          sha256sum action.yml src/*.mjs
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Attest and draft the release
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # create the draft release
+      id-token: write # sign the provenance attestation
+      attestations: write # store it
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+
+      - name: Attest the files the action runs
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/action.yml
+            release/src/*.mjs
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            cat release/notes.md
+            echo
+            echo "Use it with \`uses: ${GITHUB_REPOSITORY}@${TAG}\`, or pin its commit with \`uses: ${GITHUB_REPOSITORY}@${GITHUB_SHA} # ${TAG}\`."
+            echo
+            echo "Verify the release with \`gh release verify ${TAG} --repo ${GITHUB_REPOSITORY}\`, and each file the action runs with \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\` from a checkout of the tag."
+          } >"$notes"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "EmpirioLabs AI ${TAG}" --notes-file "$notes"

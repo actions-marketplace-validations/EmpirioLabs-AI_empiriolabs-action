@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The unit tests answer fetch with fixed responses, so they need no secret
+  # and no network.
+  test:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24, the version the action runs on
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Run the unit tests
+        run: node --test "test/*.test.mjs"
+
+  # One real request through the runner. It runs on main only, and only when
+  # the repository variable EMPIRIOLABS_MODEL names the model to use. The key
+  # is the EMPIRIOLABS_API_KEY secret of the live-test environment, which
+  # deploys from main only, so no other branch's workflow can read it.
+  live:
+    name: Live request
+    needs: test
+    if: github.ref == 'refs/heads/main' && vars.EMPIRIOLABS_MODEL != ''
+    runs-on: ubuntu-latest
+    environment: live-test
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the action
+        id: ai
+        uses: ./
+        with:
+          api-key: ${{ secrets.EMPIRIOLABS_API_KEY }}
+          model: ${{ vars.EMPIRIOLABS_MODEL }}
+          system: Answer with one word in lower case and nothing else.
+          prompt: What is the usual reply to ping?
+          max-tokens: 1024
+
+      - name: Check the outputs
+        env:
+          TEXT: ${{ steps.ai.outputs.text }}
+          USAGE: ${{ steps.ai.outputs.usage }}
+          FINISH_REASON: ${{ steps.ai.outputs.finish-reason }}
+        run: |
+          set -euo pipefail
+          echo "Finish reason: $FINISH_REASON. Usage: $USAGE"
+          if ! grep -qi 'pong' <<<"$TEXT"; then
+            echo "::error::The reply does not contain pong."
+            exit 1
+          fi
+          if ! grep -Eq '"total_tokens": *[1-9]' <<<"$USAGE"; then
+            echo "::error::The usage output has no total_tokens."
+            exit 1
+          fi

@@ -1,0 +1,45 @@
+name: EmpirioLabs AI
+description: Send a prompt to an EmpirioLabs AI model from a workflow and use the reply in later steps.
+author: EmpirioLabs AI
+
+branding:
+  icon: cpu
+  color: blue
+
+inputs:
+  api-key:
+    description: Your EmpirioLabs AI API key. Store it as an encrypted secret, such as EMPIRIOLABS_API_KEY, and pass it from there.
+    required: true
+  model:
+    description: The model ID to use, from https://docs.empiriolabs.ai/models-pricing.
+    required: true
+  prompt:
+    description: The message to send. Set prompt, prompt-file, or messages.
+    required: false
+  prompt-file:
+    description: A file whose text is sent as the message, after prompt when both are set. Use it for long input such as a diff or a log.
+    required: false
+  messages:
+    description: The whole conversation as a JSON array of messages, each with a role and content. Use it instead of prompt and prompt-file.
+    required: false
+  system:
+    description: A system message sent before the prompt or the messages.
+    required: false
+  max-tokens:
+    description: The most tokens the reply may contain. The model's default applies when it is not set.
+    required: false
+  temperature:
+    description: Sampling temperature, such as 0.2. The model's default applies when it is not set.
+    required: false
+
+outputs:
+  text:
+    description: The model's reply.
+  usage:
+    description: Token usage as JSON, with prompt_tokens, completion_tokens, and total_tokens.
+  finish-reason:
+    description: Why the model stopped, such as stop, or length when the reply reached the token limit.
+
+runs:
+  using: node24
+  main: src/index.mjs
